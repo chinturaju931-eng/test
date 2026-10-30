@@ -2,6 +2,12 @@
 
 A local marketing workspace for CommuteAds, an in-cab tablet advertising business in Hyderabad. Requires Node.js 22 or newer. No dependencies, API keys, or installation step required.
 
+![Commute Ads dashboard](docs/dashboard.png)
+
+## Update an existing Windows copy
+
+For this dashboard redesign, close the running app window, download and extract the latest ZIP, and copy only its `public` folder into your existing app folder. Choose to replace the old files. Double-click `START-WINDOWS.bat` again and refresh the browser with **Ctrl + F5**. Your saved data stays in the existing `.data` folder.
+
 ## Open on Windows
 
 1. On GitHub, choose **Code → Download ZIP**.
