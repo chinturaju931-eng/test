@@ -4,15 +4,23 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { defaultProfile, createPosts } from './brand.js';
+import { createAuth } from './auth.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const dataFile = resolve(process.env.DATA_DIR || resolve(root, '.data'), 'workspace.json');
+const production = process.env.NODE_ENV === 'production';
+const publicUrl = process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '';
+if (production && (!publicUrl || new URL(publicUrl).protocol !== 'https:')) throw Error('Hosted mode requires PUBLIC_URL (or RENDER_EXTERNAL_URL) with HTTPS.');
+const auth = await createAuth(dirname(dataFile), production);
+let apiQueue = Promise.resolve();
+let requestActor = null;
 const initial = () => ({ profile: { ...defaultProfile }, leads: [], drafts: [], activity: [] });
 let state;
 try { state = JSON.parse(await readFile(dataFile, 'utf8')); }
 catch (error) { if (error.code !== 'ENOENT') throw error; state = initial(); }
 // Fill new preference fields without replacing an existing workspace's values.
 state.profile = { ...defaultProfile, ...state.profile };
+state.version ??= 0;
 let writes = Promise.resolve();
 function persist() {
   const snapshot = JSON.stringify(state, null, 2);
@@ -44,7 +52,7 @@ function website(value) {
   if (url.protocol !== 'https:' || url.username || url.password) throw fail('Use an HTTPS website URL without credentials.');
   return url.href;
 }
-function record(action, detail) { state.activity.unshift({ id: randomUUID(), action, detail, at: new Date().toISOString() }); state.activity = state.activity.slice(0, 300); }
+function record(action, detail) { state.activity.unshift({ id: randomUUID(), action, detail, actor: requestActor?.name || 'Workspace', at: new Date().toISOString() }); state.activity = state.activity.slice(0, 300); }
 function draft(type, title, body, extra = {}) { return { id: randomUUID(), type, title, body, status: 'draft', scheduledAt: '', createdAt: new Date().toISOString(), ...extra }; }
 function generatePosts(topic) {
   return createPosts(state.profile, topic).map(({ title, body, ...extra }) => draft('post', title, body, extra));
@@ -58,14 +66,30 @@ const send = (res, code, data) => { res.writeHead(code, { 'Content-Type': 'appli
 const server = http.createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+  let release;
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  if(production) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
   try {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname.startsWith('/api/')) {
+      const previous = apiQueue;
+      apiQueue = new Promise(resolve => { release = resolve; });
+      await previous;
+      const expectedOrigin = publicUrl ? new URL(publicUrl).origin : `http://${req.headers.host}`;
+      if (!publicUrl && !/^((127\.0\.0\.1)|(localhost))(:\d+)?$/.test(req.headers.host || '')) throw fail('Unrecognized host.',403);
+      if (req.headers.origin && req.headers.origin !== expectedOrigin) throw fail('Cross-origin requests are not allowed.',403);
+      if(req.method === 'GET' && url.pathname === '/api/health') return send(res,200,{app:'commuteads',ready:true});
+      if(req.method === 'GET' && url.pathname === '/api/auth/status') return send(res,200,auth.status(req));
+      requestActor = auth.user(req);
+      const authRoute = url.pathname.startsWith('/api/auth/') || url.pathname.startsWith('/api/team/');
+      if(!authRoute && !requestActor) throw fail('Please sign in to your workspace.',401);
       if (req.method === 'GET' && url.pathname === '/api/state') return send(res, 200, state);
       if (req.method !== 'POST') throw fail('Route not found.', 404);
-      if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) throw fail('Cross-origin writes are not allowed.', 403);
       if (!req.headers['content-type']?.startsWith('application/json')) throw fail('Use application/json.', 415);
       const b = await body(req);
+      if(authRoute) return send(res,200,await auth.handle(url.pathname,req,res,b));
+      if(req.headers['if-match'] !== undefined && req.headers['if-match'] !== String(state.version)) throw fail('A teammate updated the workspace. Refresh before saving your changes.',409);
       switch (url.pathname) {
         case '/api/profile': {
           const p = { company: text(b.company, 'company', 100, true), city: text(b.city, 'city', 100, true), cabs: text(b.cabs || '', 'fleet details', 200), pricing: text(b.pricing || '', 'packages', 1000), contact: text(b.contact || '', 'contact', 200), page: link(b.page) };
@@ -125,12 +149,13 @@ const server = http.createServer(async (req, res) => {
         }
         default: throw fail('Route not found.', 404);
       }
+      state.version++;
       await persist(); return send(res, 200, state);
     }
     if (req.method !== 'GET') throw fail('Method not allowed.', 405);
     const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'] };
     const entry = files[url.pathname]; if (!entry) throw fail('Not found.', 404);
     res.writeHead(200, { 'Content-Type': entry[1] + '; charset=utf-8' }); res.end(await readFile(resolve(root, 'public', entry[0])));
-  } catch (error) { if (!res.headersSent) send(res, error.status || 500, { error: error.status ? error.message : 'Could not save or load data. Check the server log.' }); else res.end(); if (!error.status) console.error(error); }
+  } catch (error) { if (!res.headersSent) send(res, error.status || 500, { error: error.status ? error.message : 'Could not save or load data. Check the server log.' }); else res.end(); if (!error.status) console.error(error); } finally { requestActor = null; release?.(); }
 });
 server.listen(Number(process.env.PORT || 3000), process.env.HOST || '127.0.0.1', () => console.log(`CommuteAds listening on port ${server.address().port}`));

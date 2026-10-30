@@ -1,4 +1,4 @@
-let state, view = 'overview', filter = 'all';
+let state, viewer, teamUsers = [], view = 'overview', filter = 'all', unsavedInput = false;
 const $ = s => document.querySelector(s);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const names = { overview: 'Overview', content: 'Content calendar', leads: 'Leads & outreach', comments: 'Comment studio', approvals: 'Approval queue', settings: 'Brand settings' };
@@ -15,8 +15,8 @@ const icons = {
 const date = value => new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata' }).format(new Date(value));
 function toast(message, error = false) { const t = $('#toast'); t.textContent = message; t.className = error ? 'error' : ''; t.hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.hidden = true; }, 4500); }
 async function api(path, data) {
-  const response = await fetch('/api/' + path, data ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) } : {});
-  const result = await response.json(); if (!response.ok) throw Error(result.error || 'Request failed.');
+  const response = await fetch('/api/' + path, data ? { method: 'POST', headers: { 'Content-Type': 'application/json', 'If-Match': String(state?.version ?? 0) }, body: JSON.stringify(data) } : {});
+  const result = await response.json(); if (response.status === 401) showAuth(false); if (!response.ok) throw Error(result.error || 'Request failed.');
   state = result; render(); return result;
 }
 const button = (label, action, id = '', cls = '') => `<button class="button ${cls}" data-action="${action}" data-id="${esc(id)}">${label.replaceAll('↗', arrow)}</button>`;
@@ -32,7 +32,7 @@ function overview() {
   return heading('COMMUTE ADS / MARKETING STUDIO', 'Your brand. In motion.', 'Create with purpose. Connect with brands. Make every journey count.', button('＋ Create a campaign', 'navigate-content', '', 'primary')) +
     `<section class="hero"><div class="hero-topline"><span class="hero-tag"><span class="status-dot"></span> HYDERABAD, INDIA</span><span class="hero-tag">BUILT FOR BRANDS ON THE MOVE</span></div><div class="hero-center"><svg class="logo-mark" viewBox="0 0 104 90" fill="currentColor" aria-hidden="true"><path d="M28 21H60L31 66H89L74 88H14L0 66Z"/><path d="M72 0L102 45H73L60 21Z"/></svg><h2>Commute Ads</h2><p class="hero-slogan">Advertising that moves with the city.</p><p class="hero-description">Your next campaign starts here.<br>Turn a city in motion into a conversation about your brand.</p><div class="hero-actions">${button('Create your next post ↗', 'navigate-content', '', 'primary')}${button('Explore your leads', 'navigate-leads', '', 'glass')}</div></div><div class="hero-bottom"><span>IN-CAB TABLET ADVERTISING</span><span>LOCAL PRESENCE. BIG AMBITIONS.</span></div></section>` +
     `<section class="stats">${[['Drafts to review', drafts.length, 'Ready for your perspective'], ['Approved content', approved.length, 'Ready for manual sharing'], ['Prospects', state.leads.filter(l => !l.optedOut).length, 'Added by you'], ['Completed', done.length, 'Recorded manually']].map(([label,count,note]) => `<article><div class="stat-label">${label}${arrow}</div><strong>${count}</strong><small>${note}</small></article>`).join('')}</section>` +
-    `<div class="two-columns"><section class="panel"><div class="section-head"><h2>Your next move</h2><span class="tiny">LET’S GET MOVING</span></div><div class="steps">${[['01','Define your brand','Set your company details and contact information.','settings'],['02','Create your next campaign','Create three posts for your next campaign.','content'],['03','Find your next connection','Add a prospect and prepare a personal introduction.','leads']].map(([n,t,s,v]) => `<button class="step" data-action="navigate-${v}"><span class="step-number">${n}</span><span><strong>${t}</strong><small>${s}</small></span>${arrow}</button>`).join('')}</div></section><section class="panel"><div class="section-head"><h2>Recent activity</h2><span class="tiny">YOUR WORKSPACE</span></div>${state.activity.length ? `<div class="activity">${state.activity.slice(0,5).map(a => `<div><span class="activity-dot"></span><div><strong>${esc(a.action)}</strong><p>${esc(a.detail)}</p><small>${date(a.at)} IST</small></div></div>`).join('')}</div>` : `<div class="quiet-state">${arrow}<h3>Your next chapter starts here</h3><p>Drafts, approvals, and completed tasks will appear as you work.</p></div>`}</section></div><div class="notice"><span>ⓘ</span><p><strong>You’re in control.</strong> Drafts use built-in templates. Dates are planning reminders. Copy approved content to LinkedIn and mark it completed after sharing.</p></div>`;
+    `<div class="two-columns"><section class="panel"><div class="section-head"><h2>Your next move</h2><span class="tiny">LET’S GET MOVING</span></div><div class="steps">${[['01','Define your brand','Set your company details and contact information.','settings'],['02','Create your next campaign','Create three posts for your next campaign.','content'],['03','Find your next connection','Add a prospect and prepare a personal introduction.','leads']].map(([n,t,s,v]) => `<button class="step" data-action="navigate-${v}"><span class="step-number">${n}</span><span><strong>${t}</strong><small>${s}</small></span>${arrow}</button>`).join('')}</div></section><section class="panel"><div class="section-head"><h2>Recent activity</h2><span class="tiny">YOUR WORKSPACE</span></div>${state.activity.length ? `<div class="activity">${state.activity.slice(0,5).map(a => `<div><span class="activity-dot"></span><div><strong>${esc(a.action)}</strong><p>${esc(a.detail)}</p><small>${esc(a.actor || 'Workspace')} · ${date(a.at)} IST</small></div></div>`).join('')}</div>` : `<div class="quiet-state">${arrow}<h3>Your next chapter starts here</h3><p>Drafts, approvals, and completed tasks will appear as you work.</p></div>`}</section></div><div class="notice"><span>ⓘ</span><p><strong>You’re in control.</strong> Drafts use built-in templates. Dates are planning reminders. Copy approved content to LinkedIn and mark it completed after sharing.</p></div>`;
 }
 function content() {
   const posts = state.drafts.filter(d => d.type === 'post');
@@ -54,13 +54,19 @@ function settings() {
   return heading('THE DETAILS THAT MATTER', 'Brand settings', 'Keep your business information accurate and ready for your next campaign.') + `<section class="panel settings-panel"><form data-form="profile" class="stack"><div class="form-row"><label>Company name<input name="company" value="${esc(p.company)}" required maxlength="100"></label><label>Operating city<input name="city" value="${esc(p.city)}" required maxlength="100"></label></div><label>LinkedIn company page<input name="page" type="url" value="${esc(p.page)}" placeholder="https://www.linkedin.com/company/…"></label><label>Website<input name="website" type="url" value="${esc(p.website)}" maxlength="500"></label><div class="form-row"><label>Business email<input name="email" type="email" value="${esc(p.email)}" maxlength="200"></label><label>Business phone<input name="phone" value="${esc(p.phone)}" maxlength="100"></label></div><label>Contact or booking information<input name="contact" value="${esc(p.contact)}" maxlength="200" placeholder="Business email or booking URL, included in post drafts"></label><div class="form-row"><label>Number of tablets<input name="tablets" value="${esc(p.tablets)}" maxlength="100"></label><label>Verified cab details (optional)<input name="cabs" value="${esc(p.cabs)}" maxlength="200" placeholder="Tablet count does not imply cab count"></label></div><label>Advertising packages and pricing<textarea name="pricing" rows="3" maxlength="1000" placeholder="Keep your package details here for reference">${esc(p.pricing)}</textarea></label><label>Target advertisers<textarea name="audience" rows="2" maxlength="1000">${esc(p.audience)}</textarea></label><div class="form-row"><label>Days between posts<input name="cadenceDays" type="number" min="1" max="30" step="1" required value="${esc(p.cadenceDays)}"></label><div class="language-field"><label for="post-languages">Post languages</label><select id="post-languages" name="languages"><option value="both" ${p.languages === 'both' ? 'selected' : ''}>English + Telugu</option><option value="en" ${p.languages === 'en' ? 'selected' : ''}>English</option><option value="te" ${p.languages === 'te' ? 'selected' : ''}>Telugu</option></select></div></div><p class="muted">Each bilingual draft contains both languages. Campaign topics stay as entered; Telugu templates are not automatic translations of your topic. Cadence guides planning and does not enable automatic publishing.</p><p class="muted">Fleet and pricing are private reference notes. Add verified figures to drafts yourself when relevant.</p><div><button class="button primary">Save brand settings</button></div></form></section><div class="notice"><span>ⓘ</span><p><strong>LinkedIn: not connected.</strong> This version supports drafting, review, and manual sharing. Automatic publishing needs an approved LinkedIn application and company-page permissions. There is no automatic message or comment sending.</p></div><section class="panel section-space"><h2>Your workspace data</h2><p class="muted">Download a JSON backup of your settings, leads, drafts, and activity. Store it securely; it may contain contact information.</p>${button('Download workspace backup ↓', 'export')}</section>`;
 }
 function render() {
+  unsavedInput = false;
+  $('.connection').innerHTML = `<span class="signed-in-user">${esc(viewer?.name || '')}</span>${button('Refresh', 'refresh')}${button('Sign out', 'logout')}`;
   $('#navigation').innerHTML = Object.entries(names).map(([id,name]) => `<button data-action="navigate-${id}" class="${view === id ? 'active' : ''}" ${view === id ? 'aria-current="page"' : ''}><span class="nav-icon" aria-hidden="true">${icons[id]}</span>${name}${id === 'approvals' ? `<span class="nav-count" aria-hidden="true">${state.drafts.filter(d => d.status === 'draft').length}</span>` : ''}</button>`).join('');
   $('#page-name').textContent = names[view];
-  $('#content').innerHTML = ({ overview, content, leads, comments, approvals, settings })[view]();
+  $('#content').innerHTML = ({ overview, content, leads, comments, approvals, settings, team })[view]();
 }
 document.addEventListener('click', async event => {
   const target = event.target.closest('[data-action]'); if (!target) return;
   const { action, id } = target.dataset;
+  if (action === 'logout') { try { await accountApi('auth/logout',{}); showAuth(false); } catch(error) { toast(error.message,true); } return; }
+  if (action === 'refresh') { try { await api('state'); toast('Latest team updates loaded.'); } catch(error) { toast(error.message,true); } return; }
+  if (action === 'remove-member') { try { teamUsers = (await accountApi('team/remove',{id})).users; render(); toast('Team access removed.'); } catch(error) { toast(error.message,true); } return; }
+  if (action === 'navigate-team' && viewer?.role === 'owner') { try { teamUsers = (await accountApi('team/list',{})).users; } catch(error) { toast(error.message,true); return; } }
   if (action.startsWith('navigate-')) { view = action.slice(9); render(); window.scrollTo(0,0); return; }
   if (action === 'filter') { filter = id; render(); return; }
   const d = state.drafts.find(d => d.id === id);
@@ -89,4 +95,64 @@ document.addEventListener('submit', async event => {
     toast(form.dataset.form === 'schedule' ? 'Date planned. Publishing is manual.' : 'Saved to your workspace.');
   } catch (error) { toast(error.message,true); } finally { if (submit) submit.disabled = false; }
 });
-api('state').catch(error => { $('#content').textContent = 'Unable to load the workspace. Check the server and reload.'; toast(error.message,true); });
+names.team = 'Team & account';
+icons.team = icons.leads;
+let setupCode = new URLSearchParams(location.hash.slice(1)).get('setup') || '';
+if (location.hash) history.replaceState(null,'',location.pathname);
+async function accountApi(path, data) {
+  const response = await fetch('/api/' + path, data === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  const result = await response.json();
+  if (!response.ok) throw Error(result.error || 'Request failed.');
+  return result;
+}
+function showAuth(setupRequired) {
+  state = null; viewer = null; teamUsers = []; view = 'overview';
+  $('#content').innerHTML = ''; $('#navigation').innerHTML = ''; $('#editor').close();
+  document.body.classList.add('signed-out');
+  $('#auth-root').innerHTML = `<div class="auth-card"><div class="auth-brand">${$('.brand').innerHTML}</div><p class="eyebrow">PRIVATE TEAM WORKSPACE</p><h1>${setupRequired ? 'Make it your workspace.' : 'Welcome back.'}</h1><p class="subtitle">${setupRequired ? 'Create your owner account, then add your teammates.' : 'Sign in to your Commute Ads workspace.'}</p><form class="stack" data-auth="${setupRequired ? 'setup' : 'login'}">${setupRequired ? `<label>Setup code<input name="code" type="password" required autocomplete="off" value="${esc(setupCode)}"></label><p class="muted">The Windows launcher fills this in for you. For hosted setup, use SETUP_CODE from your hosting settings.</p><label>Your name<input name="name" required maxlength="100" autocomplete="name"></label>` : ''}<label>Email<input name="email" type="email" required autocomplete="username"></label><label>Password<input name="password" type="password" required minlength="12" maxlength="200" autocomplete="${setupRequired ? 'new-password' : 'current-password'}"></label><p class="form-error" role="alert"></p><button class="button primary">${setupRequired ? 'Create owner account' : 'Sign in'}</button></form><p class="muted">Access is limited to accounts created by your workspace owner.</p></div>`;
+}
+function team() {
+  return heading('PRIVATE BY INVITATION', 'Team & account', 'Give your team access to one shared marketing workspace.') + `<div class="notice"><span>ⓘ</span><p>Everyone using this same app address shares its drafts, leads, and activity. Separate local installations do not sync. Updates refresh every 20 seconds while you are not editing. You can also use Refresh. Share account details privately.</p></div><div class="two-columns section-space"><section class="panel"><h2>Your account</h2><p class="muted">${esc(viewer.name)} · ${esc(viewer.email)} · ${esc(viewer.role)}</p><form class="stack" data-account="password"><label>Current password<input name="currentPassword" type="password" required autocomplete="current-password"></label><label>New password<input name="password" type="password" required minlength="12" maxlength="200" autocomplete="new-password"></label><button class="button primary">Change password</button></form></section>${viewer.role === 'owner' ? `<section class="panel"><h2>Add a teammate</h2><form class="stack" data-account="add"><label>Name<input name="name" required maxlength="100" autocomplete="off"></label><label>Email<input name="email" type="email" required autocomplete="off"></label><label>Initial password<input name="password" type="password" required minlength="12" maxlength="200" autocomplete="new-password"></label><p class="muted">Use at least 12 characters. Give the teammate their login details privately and ask them to change this password after signing in. No email is sent automatically.</p><button class="button primary">Create team account</button></form></section>` : ''}</div>${viewer.role === 'owner' ? `<section class="panel"><h2>Workspace access</h2><div class="leads-list">${teamUsers.map(u=>`<article><div class="lead-info"><strong>${esc(u.name)}</strong><small>${esc(u.email)} · ${esc(u.role)}</small></div>${u.role !== 'owner' ? button('Remove access','remove-member',u.id) : ''}</article>`).join('')}</div></section>` : ''}`;
+}
+document.addEventListener('submit',async event=>{
+  const form=event.target;
+  if(!form.dataset.auth && !form.dataset.account) return;
+  event.preventDefault();
+  const submit=form.querySelector('button'); submit.disabled=true;
+  const values=Object.fromEntries(new FormData(form));
+  try {
+    if(form.dataset.auth) {
+      const result=await accountApi('auth/'+form.dataset.auth,values);
+      viewer=result.user; setupCode='';
+      document.body.classList.remove('signed-out'); $('#auth-root').innerHTML='';
+      await api('state');
+    } else if(form.dataset.account === 'add') {
+      teamUsers=(await accountApi('team/add',values)).users; render(); toast('Account created. Share the login details privately.');
+    } else {
+      await accountApi('auth/password',values); form.reset(); toast('Password changed. Other sessions have been signed out.');
+    }
+  } catch(error) {
+    if(form.dataset.auth) form.querySelector('.form-error').textContent=error.message;
+    else toast(error.message,true);
+  } finally { submit.disabled=false; }
+});
+(async()=>{
+  try {
+    const status=await accountApi('auth/status');
+    if(!status.user) return showAuth(status.setupRequired);
+    viewer=status.user; document.body.classList.remove('signed-out'); await api('state');
+  } catch(error) { $('#auth-root').textContent='Unable to load the workspace. Check the server and reload.'; toast(error.message,true); }
+})();
+
+document.addEventListener('input',()=>{ unsavedInput=true; });
+setInterval(async()=>{
+  if(!viewer || document.hidden || unsavedInput || $('#editor').open) return;
+  try {
+    const response=await fetch('/api/state');
+    if(!viewer) return;
+    if(response.status===401) return showAuth(false);
+    if(!response.ok) return;
+    const latest=await response.json();
+    if(viewer && !unsavedInput && !$('#editor').open && latest.version !== state?.version) { state=latest; render(); }
+  } catch { /* The next refresh retries temporary connection failures. */ }
+},20000);

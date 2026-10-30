@@ -1,0 +1,25 @@
+# Deploy one instance: accounts and workspace data share the persistent disk.
+services:
+  - type: web
+    name: commuteads-team
+    runtime: node
+    plan: starter
+    buildCommand: node --check server.js
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: false
+    disk:
+      name: commuteads-data
+      mountPath: /var/data/commuteads
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATA_DIR
+        value: /var/data/commuteads
+      - key: SETUP_CODE
+        generateValue: true

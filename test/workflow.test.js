@@ -7,9 +7,12 @@ import { join } from 'node:path';
 import { once } from 'node:events';
 import { defaultProfile, createPosts } from '../brand.js';
 
-let processHandle, base, dir;
+let processHandle, base, dir, cookie = '';
+const nativeFetch = globalThis.fetch;
+const fetch = (url, options = {}) => nativeFetch(url, { ...options, headers: { Cookie: cookie, ...options.headers } });
+const ownerLogin = {email:'owner@example.com',password:'Owner-test-password-123'};
 async function start() {
-  processHandle = spawn(process.execPath, ['server.js'], { env: { ...process.env, PORT: '0', DATA_DIR: dir }, stdio: ['ignore', 'pipe', 'pipe'] });
+  processHandle = spawn(process.execPath, ['server.js'], { env: { ...process.env, PORT: '0', DATA_DIR: dir, SETUP_CODE: 'test-setup-code-only-123456789' }, stdio: ['ignore', 'pipe', 'pipe'] });
   base = await new Promise((resolve, reject) => {
     let output = '';
     processHandle.stdout.on('data', chunk => { output += chunk; const port = output.match(/port (\d+)/); if (port) resolve(`http://127.0.0.1:${port[1]}`); });
@@ -17,13 +20,15 @@ async function start() {
     processHandle.once('exit', code => reject(Error(`Server exited: ${code}`)));
     processHandle.stderr.on('data', data => { output += data; });
   });
+  if(cookie) await post('auth/login',ownerLogin);
 }
 async function stop() { const exited = once(processHandle, 'exit'); processHandle.kill(); await exited; }
 async function post(path, body, expected = 200, headers = {}) {
   const response = await fetch(`${base}/api/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+  const setCookie=response.headers.get('set-cookie'); if(setCookie) cookie=setCookie.split(';')[0];
   const data = await response.json(); assert.equal(response.status, expected, JSON.stringify(data)); return data;
 }
-before(async () => { dir = await mkdtemp(join(tmpdir(), 'commuteads-')); await start(); });
+before(async () => { dir = await mkdtemp(join(tmpdir(), 'commuteads-')); await start(); await post('auth/setup',{...ownerLogin,name:'Owner',code:'test-setup-code-only-123456789'}); });
 after(async () => { await stop(); await rm(dir, { recursive:true, force:true }); });
 
 test('CommuteAds facts, bilingual copy, and every-two-days planning', async () => {
@@ -112,4 +117,40 @@ test('brand preferences validate, persist, and survive older profile clients', a
   const saved = (await (await fetch(`${base}/api/state`)).json()).profile;
   assert.equal(saved.languages,'te'); assert.equal(saved.cadenceDays,'4');
   assert.equal(saved.tablets,'10'); assert.equal(saved.email,'updated@example.com');
+});
+
+
+test('private workspace denies anonymous access and enforces owner-only account management', async () => {
+  const ownerCookie=cookie;
+  for(const route of ['/api/state','/.data/accounts.json','/auth.js']) {
+    const r=await fetch(base+route,{headers:{Cookie:''}});
+    assert.equal(r.status,route==='/api/state'?401:404);
+  }
+  await post('generate',{type:'post',topic:'anonymous'},401,{Cookie:''});
+  await post('auth/setup',{...ownerLogin,code:'test-setup-code-only-123456789'},409,{Cookie:''});
+  await post('auth/login',{email:ownerLogin.email,password:'incorrect'},401,{Cookie:''});
+  await post('auth/login',ownerLogin,403,{Cookie:'',Origin:'https://attacker.example'});
+  const team=await post('team/add',{name:'Teammate',email:'member@example.com',password:'Initial-member-password'});
+  const member=team.users.find(u=>u.email==='member@example.com');
+  assert.equal(member.role,'member'); assert.equal(member.hash,undefined);
+  await post('auth/login',{email:member.email,password:'Initial-member-password'});
+  const originalMemberCookie=cookie;
+  assert.match(cookie,/commuteads_session=/);
+  await post('team/add',{name:'Bad',email:'bad@example.com',password:'Invalid-grant-password'},403);
+  await post('team/list',{},403);
+  let s=await post('generate',{type:'post',topic:'Team campaign'});
+  assert.equal(s.activity[0].actor,'Teammate');
+  await post('auth/password',{currentPassword:'Initial-member-password',password:'Changed-member-password'});
+  assert.equal((await fetch(base+'/api/state',{headers:{Cookie:originalMemberCookie}})).status,401);
+  const memberCookie=cookie;
+  cookie=ownerCookie;
+  await post('team/remove',{id:member.id});
+  assert.equal((await fetch(base+'/api/state',{headers:{Cookie:memberCookie}})).status,401);
+  await post('auth/login',{email:member.email,password:'Changed-member-password'},401,{Cookie:''});
+  const current=await (await fetch(base+'/api/state')).json();
+  const results=await Promise.all([1,2].map(n=>fetch(base+'/api/generate',{method:'POST',headers:{'Content-Type':'application/json','If-Match':String(current.version)},body:JSON.stringify({type:'post',topic:'Concurrent '+n})})));
+  assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);
+  await post('auth/logout',{});
+  assert.equal((await fetch(base+'/api/state',{headers:{Cookie:ownerCookie}})).status,401);
+  await post('auth/login',ownerLogin);
 });
