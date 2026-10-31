@@ -22,6 +22,7 @@ let state = await store.read('workspace',initial());
 state.profile = { ...defaultProfile, ...state.profile };
 state.version ??= 0;
 function persist() { return store.write('workspace',state); }
+function workspaceView() { return {...state,members:auth.directory()}; }
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 function text(value, name, max = 5000, required = false) {
   if (typeof value !== 'string' || value.length > max || (required && !value.trim())) throw fail(`Enter a valid ${name} (up to ${max} characters).`);
@@ -77,7 +78,7 @@ const server = http.createServer(async (req, res) => {
       const authRoute = url.pathname.startsWith('/api/auth/') || url.pathname.startsWith('/api/team/');
       if(!authRoute && !requestActor) throw fail('Please sign in to your workspace.',401);
       if(!authRoute && store.remote) { state=await store.read('workspace',initial()); state.version ??= 0; state.profile={...defaultProfile,...state.profile}; }
-      if (req.method === 'GET' && url.pathname === '/api/state') return send(res, 200, state);
+      if (req.method === 'GET' && url.pathname === '/api/state') return send(res, 200, workspaceView());
       if (req.method !== 'POST') throw fail('Route not found.', 404);
       if (!req.headers['content-type']?.startsWith('application/json')) throw fail('Use application/json.', 415);
       const b = await body(req);
@@ -98,9 +99,37 @@ const server = http.createServer(async (req, res) => {
           const lead = { id: randomUUID(), company: text(b.company, 'company', 100, true), name: text(b.name || '', 'contact name', 100), sector: text(b.sector || '', 'sector', 100), context: text(b.context || '', 'personalization notes', 1000), url: link(b.url), optedOut: false };
           state.leads.push(lead); record('Lead added', lead.company); break;
         }
+        case '/api/leads/update': {
+          const lead=state.leads.find(l=>l.id===b.id); if(!lead) throw fail('Lead not found.',404);
+          const stage=text(b.stage,'lead stage',30,true);
+          if(!['new','contacted','interested','proposal','won','lost'].includes(stage)) throw fail('Choose a valid lead stage.');
+          const notes=text(b.notes || '', 'lead notes',2000);
+          const details={company:text(b.company ?? lead.company,'company',100,true),name:text(b.name ?? lead.name,'contact name',100),sector:text(b.sector ?? lead.sector,'sector',100),context:text(b.context ?? lead.context,'personalization notes',1000),url:link(b.url ?? lead.url)};
+          const assigneeId=text(b.assigneeId ?? lead.assigneeId ?? '', 'lead owner',100);
+          if(assigneeId && !auth.directory().some(u=>u.id===assigneeId)) throw fail('Choose a current teammate or leave this lead unassigned.');
+          const followUp=text(b.followUp || '', 'follow-up date',10);
+          if(followUp && (!/^\d{4}-\d{2}-\d{2}$/.test(followUp) || !Number.isFinite(Date.parse(followUp)) || new Date(followUp).toISOString().slice(0,10)!==followUp)) throw fail('Choose a valid follow-up date.');
+          if(lead.optedOut && followUp) throw fail('Follow-ups are disabled for opted-out contacts.');
+          if(['won','lost'].includes(stage) && followUp) throw fail('Clear the follow-up date for a closed lead.');
+          Object.assign(lead,{...details,stage,notes,followUp,assigneeId,updatedAt:new Date().toISOString(),updatedBy:requestActor.name});
+          record('Lead updated',`${lead.company}: ${stage}`); break;
+        }
+        case '/api/leads/log': {
+          const lead=state.leads.find(l=>l.id===b.id); if(!lead) throw fail('Lead not found.',404);
+          const channel=text(b.channel,'activity type',30,true);
+          if(!['call','email','linkedin','meeting','note'].includes(channel)) throw fail('Choose an activity type.');
+          if(lead.optedOut && channel!=='note') throw fail('Only internal notes can be added for opted-out contacts.');
+          const note=text(b.note,'conversation summary',2000,true);
+          if((lead.touchpoints || []).length>=100) throw fail('This lead already has 100 activity entries.');
+          const at=new Date().toISOString();
+          lead.touchpoints ??= []; lead.touchpoints.unshift({id:randomUUID(),channel,note,author:requestActor.name,at});
+          if(channel!=='note') { lead.lastContactAt=at; if(!lead.stage || lead.stage==='new') lead.stage='contacted'; }
+          record('Lead activity logged',`${lead.company}: ${channel}`); break;
+        }
         case '/api/leads/opt-out': {
           const lead = state.leads.find(l => l.id === b.id); if (!lead) throw fail('Lead not found.', 404);
           lead.optedOut = true;
+          lead.followUp = '';
           state.drafts.filter(d => d.leadId === lead.id && d.status !== 'completed').forEach(d => { d.status = 'rejected'; d.scheduledAt = ''; });
           record('Contact suppressed', lead.company); break;
         }
@@ -117,6 +146,18 @@ const server = http.createServer(async (req, res) => {
           } else throw fail('Unknown draft type.');
           record('Drafts generated', b.type); break;
         }
+        case '/api/drafts/create': {
+          const title=text(b.title,'post title',150,true), content=text(b.body,'post content',5000,true);
+          state.drafts.unshift(draft('post',title,content,{createdBy:requestActor.name}));
+          record('Post written',title); break;
+        }
+        case '/api/drafts/note': {
+          const d=state.drafts.find(d=>d.id===b.id); if(!d) throw fail('Draft not found.',404);
+          const note=text(b.note,'review note',1000,true);
+          if((d.notes || []).length>=50) throw fail('This draft already has 50 review notes.');
+          d.notes ??= []; d.notes.push({id:randomUUID(),body:note,author:requestActor.name,at:new Date().toISOString()});
+          record('Review note added',d.title); break;
+        }
         case '/api/drafts/update': {
           const d = state.drafts.find(d => d.id === b.id); if (!d) throw fail('Draft not found.', 404);
           if (d.status === 'completed') throw fail('Completed items are read-only.');
@@ -126,10 +167,12 @@ const server = http.createServer(async (req, res) => {
             if (b.status === 'completed' && (d.status !== 'approved' || editedBody !== undefined)) throw fail('Approve this item first.');
             if (state.leads.find(l => l.id === d.leadId)?.optedOut && b.status !== 'rejected') throw fail('This contact is suppressed.');
           }
-          if (editedBody !== undefined) { d.body = editedBody; d.status = 'draft'; d.scheduledAt = ''; }
+          if (editedBody !== undefined) { d.body = editedBody; d.status = 'draft'; d.scheduledAt = ''; d.reviewedBy=''; d.reviewedAt=''; }
           if (b.status !== undefined) {
             d.status = b.status;
-            if (b.status === 'completed') d.completedAt = new Date().toISOString();
+            if (b.status === 'completed') { d.completedAt = new Date().toISOString(); d.completedBy=requestActor.name; }
+            if (['approved','rejected'].includes(b.status)) { d.reviewedBy=requestActor.name; d.reviewedAt=new Date().toISOString(); }
+            if (b.status === 'draft') { d.reviewedBy=''; d.reviewedAt=''; }
             if (b.status !== 'approved') d.scheduledAt = '';
           }
           record('Draft updated', `${d.title}: ${d.status}`); break;
@@ -140,10 +183,15 @@ const server = http.createServer(async (req, res) => {
           const time = new Date(b.at); if (!Number.isFinite(time.getTime()) || time <= new Date()) throw fail('Choose a future date and time.');
           d.scheduledAt = time.toISOString(); record('Post date planned', d.title); break;
         }
+        case '/api/drafts/unschedule': {
+          const d=state.drafts.find(d=>d.id===b.id);
+          if(!d || d.type!=='post' || d.status!=='approved') throw fail('Choose an approved post.');
+          d.scheduledAt=''; record('Post date removed',d.title); break;
+        }
         default: throw fail('Route not found.', 404);
       }
       state.version++;
-      await persist(); return send(res, 200, state);
+      await persist(); return send(res, 200, workspaceView());
     }
     if (req.method !== 'GET') throw fail('Method not allowed.', 405);
     const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'] };

@@ -1,12 +1,14 @@
 from playwright.sync_api import sync_playwright
 import subprocess, tempfile, os, time, urllib.request
 from pathlib import Path
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 with tempfile.TemporaryDirectory(prefix='commuteads-ui-') as data:
     server = subprocess.Popen(['node','server.js'], cwd=Path(__file__).resolve().parents[1], env={**os.environ, 'PORT':'3101','DATA_DIR':data,'SETUP_CODE':'browser-test-setup-only-123456789','NODE_ENV':'development'}, stdout=subprocess.PIPE)
     try:
         for i in range(40):
             try:
-                urllib.request.urlopen('http://127.0.0.1:3101/api/state',timeout=1)
+                urllib.request.urlopen('http://127.0.0.1:3101/api/health',timeout=1)
                 break
             except OSError: time.sleep(.1)
         with sync_playwright() as p:
@@ -35,14 +37,64 @@ with tempfile.TemporaryDirectory(prefix='commuteads-ui-') as data:
             page.get_by_label('Plan publish time (IST)').first.fill('2099-01-01T10:00')
             page.get_by_role('button',name='Save date',exact=True).first.click()
             page.get_by_text('Planned:',exact=False).wait_for()
+            page.get_by_role('button',name='Write a post',exact=False).click()
+            page.get_by_label('Post title',exact=True).fill('A custom calendar campaign')
+            page.get_by_label('Post content',exact=True).fill('Our next brand conversation starts in Hyderabad. మా బ్రాండ్ సందేశం.')
+            page.get_by_role('button',name='Save post draft',exact=True).click()
+            card=page.locator('.draft-card').filter(has=page.get_by_role('heading',name='A custom calendar campaign',exact=True))
+            card.get_by_text('Review notes (0)',exact=True).click()
+            card.get_by_label('Add a review note',exact=True).fill('Check the final creative with the team.')
+            card.get_by_role('button',name='Save note',exact=True).click()
+            card.get_by_text('Review notes (1)',exact=True).wait_for()
+            card.get_by_role('button',name='Approve',exact=True).click()
+            day=(datetime.now(ZoneInfo('Asia/Kolkata'))+timedelta(days=1)).strftime('%Y-%m-%d')
+            card.get_by_label('Plan publish time (IST)',exact=True).fill(day+'T00:15')
+            card.get_by_role('button',name='Save date',exact=True).click()
+            card.get_by_text('Planned:',exact=False).wait_for()
+            if day[:7] != datetime.now(ZoneInfo('Asia/Kolkata')).strftime('%Y-%m'):
+                page.get_by_role('button',name='Next',exact=True).click()
+            page.locator('[data-action="calendar-day"][data-id="'+day+'"]').click()
+            assert page.locator('.draft-card').count()==1
+            page.get_by_role('heading',name='A custom calendar campaign',exact=True).wait_for()
+            page.screenshot(path='/tmp/commuteads-calendar-upgrade.png',full_page=True)
+            page.set_viewport_size({'width':390,'height':844})
+            assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'), 'Calendar overflow'
+            page.screenshot(path='/tmp/commuteads-calendar-mobile.png',full_page=True)
+            page.set_viewport_size({'width':1440,'height':1100})
+            page.get_by_role('button',name='Remove date',exact=True).click()
+            page.get_by_role('heading',name='No posts planned for this day',exact=True).wait_for()
+            page.get_by_role('button',name='Show all posts',exact=True).click()
             page.get_by_role('button',name='Leads & outreach',exact=True).click()
             page.get_by_label('Company',exact=True).fill('Example brand')
             page.get_by_label('Contact name',exact=True).fill('Priya')
             page.get_by_role('button',name='Add prospect',exact=False).click()
+            page.get_by_role('button',name='Details',exact=True).click()
+            page.get_by_label('Lead stage',exact=True).select_option('interested')
+            page.get_by_label('Assigned teammate',exact=True).select_option(label='Workspace Owner')
+            page.get_by_label('Follow-up date (IST)',exact=True).fill('2020-01-02')
+            page.get_by_label('Internal notes',exact=True).fill('Review premium campaign options.')
+            page.get_by_role('button',name='Save lead details',exact=True).click()
+            page.get_by_text('Follow-up: 2020-01-02',exact=False).wait_for()
+            page.get_by_label('Search prospects',exact=True).fill('not matching')
+            page.get_by_role('button',name='Search',exact=True).click()
+            page.get_by_role('heading',name='No matching prospects',exact=True).wait_for()
+            page.get_by_role('button',name='Reset',exact=True).click()
+            page.get_by_text('Owner: Workspace Owner',exact=True).wait_for()
+            page.get_by_role('button',name='Activity',exact=True).click()
+            page.get_by_label('Activity type',exact=True).select_option('call')
+            page.get_by_label('Conversation summary',exact=True).fill('Discussed a premium local campaign. Follow up with creative options.')
+            page.get_by_role('button',name='Log activity',exact=True).click()
+            page.locator('#lead-timeline').get_by_text('Discussed a premium local campaign. Follow up with creative options.',exact=True).wait_for()
+            page.get_by_role('button',name='Close lead activity',exact=True).click()
+            page.screenshot(path='/tmp/commuteads-leads-upgrade.png',full_page=True)
+            page.set_viewport_size({'width':390,'height':844})
+            assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'), 'Leads layout overflow'
+            page.screenshot(path='/tmp/commuteads-leads-mobile.png',full_page=True)
+            page.set_viewport_size({'width':1440,'height':1100})
             page.get_by_role('button',name='Draft message',exact=True).click()
             page.get_by_role('heading',name='Introduction to Example brand').wait_for()
             page.get_by_role('button',name='Opt out',exact=True).click()
-            page.get_by_text('Do not contact',exact=True).wait_for()
+            page.locator('.leads-list .badge').filter(has_text='Do not contact').wait_for()
             page.get_by_role('button',name='Comment studio',exact=True).click()
             page.get_by_label('Brand or competitor').fill('Example media')
             page.get_by_label('Paste the post').fill('Our new Hyderabad campaign.')
@@ -98,7 +150,7 @@ with tempfile.TemporaryDirectory(prefix='commuteads-ui-') as data:
             page.screenshot(path='/tmp/commuteads-team-login.png',full_page=True)
             assert not errors, errors
             browser.close()
-            print('Browser checks passed: owner setup, private login, team permissions, access revocation, desktop and mobile; posts, editing, approvals, dates, leads, opt-outs, comments, settings persistence; no JS errors.')
+            print('Browser checks passed: owner setup, private login, team permissions, access revocation, desktop and mobile; calendar day filtering, custom composer, review notes, lead stages/search, follow-ups, editing, approvals, opt-outs, comments, settings persistence; no JS errors.')
     finally:
         server.terminate()
         server.wait(timeout=10)

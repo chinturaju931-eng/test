@@ -69,6 +69,7 @@ export async function createAuth(dir, production, store) {
     return {id:randomUUID(),name:b.name.trim(),email:normalized,role,...await hash(password(b.password))};
   }
   return {
+    directory:()=>users.map(u=>({id:u.id,name:u.name})),
     async refresh() { if(store.remote) users=await store.read('accounts',[]); },
     user:req=>{const u=current(req);return u?safe(u):null;},
     status:req=>({ user:current(req)?safe(current(req)):null, setupRequired:users.length===0 }),

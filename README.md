@@ -42,6 +42,10 @@ Local copies and the hosted workspace are **separate data stores**. Existing loc
 
 The repository contains deployment configuration, not a live deployment. Render and Neon setup happens in your accounts; this repository does not create paid resources. No Render API credentials are stored in this project. Automatic deployment is disabled; deploy later changes deliberately from Render.
 
+### Update your existing Render dashboard
+
+After changes are uploaded to GitHub, open your service in Render and choose **Manual Deploy → Deploy latest commit**. Wait for **Live**, then open your dashboard and refresh with **Ctrl + F5**. Keep the existing Neon database and environment settings. The lead tracking and calendar update uses the existing storage format and retains saved records; it needs no database migration or plan upgrade. You may need to sign in again after deployment.
+
 ## Development and configuration
 
 ```sh
@@ -58,12 +62,18 @@ Hosted mode uses `NODE_ENV=production`, `HOST=0.0.0.0`, `DATABASE_URL`, `REQUIRE
 ## Marketing capabilities
 
 - Three post drafts per campaign, with English and Telugu templates. Default planning cadence: one bilingual post every two days (campaign days 1, 3, 5).
-- Prospects entered by your team, personalized message drafts, and opt-out suppression.
+- Prospects entered by your team, editable contact details, personalized message drafts, and opt-out suppression.
+- Lead stages: new, contacted, interested, proposal sent, won, and lost. Assign leads to teammates and filter by stage, owner, or company/contact/sector search.
+- Follow-up dates with due reminders in the overview and lead filters. Closed and opted-out leads cannot have follow-up dates.
+- A per-lead history of manually logged calls, emails, LinkedIn conversations, meetings, and internal notes, with the teammate and timestamp recorded. Logging an interaction does not send a message or place a call.
 - Comment drafts using a source post and your own specific observation.
-- Editing, review, approval, date planning, and manually recorded completion.
+- Custom post writing, editing, teammate review notes, approval, date planning, and manually recorded completion.
+- A monthly content calendar with day filtering and planned/completed posts in India Standard Time. Approved posts can have their planned dates removed.
 - Company details, activity history, and workspace export.
 
 LinkedIn is not connected. Content uses templates rather than an LLM; topics stay as entered and are not automatically translated. Planned dates do not automatically publish. Posting, messages, and comments are shared manually. Marketing counters reflect workspace records, not LinkedIn engagement metrics.
+
+[Lead tracking preview](docs/leads.png) · [Content calendar preview](docs/calendar.png). Screenshots use sample records.
 
 Business defaults in `brand.js` include 10 tablets in Hyderabad (cab count unconfirmed), the Commute Ads page and website, connect@commuteads.com, and 6300081436. Pricing is discussed after connecting with a client. Target advertisers are brands across sectors with premium campaign budgets; this makes no claim about passengers' income.
 

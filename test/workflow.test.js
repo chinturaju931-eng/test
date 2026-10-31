@@ -154,3 +154,69 @@ test('private workspace denies anonymous access and enforces owner-only account 
   assert.equal((await fetch(base+'/api/state',{headers:{Cookie:ownerCookie}})).status,401);
   await post('auth/login',ownerLogin);
 });
+
+test('custom posts retain review notes, clear stale approvals, and support removing planned dates', async()=>{
+  await post('drafts/create',{title:'',body:'Copy'},400);
+  let s=await post('drafts/create',{title:'A campaign written by the team',body:'English copy. తెలుగు సందేశం.'});
+  const id=s.drafts[0].id;
+  assert.equal(s.drafts[0].status,'draft'); assert.equal(s.drafts[0].createdBy,'Owner');
+  await post('drafts/note',{id,note:'',author:'Someone else'},400);
+  s=await post('drafts/note',{id,note:'Confirm the offer before posting.',author:'Someone else'});
+  assert.equal(s.drafts[0].notes[0].author,'Owner');
+  await post('drafts/update',{id,status:'approved'});
+  await post('drafts/schedule',{id,at:'2098-12-31T18:45:00Z'});
+  s=await post('drafts/unschedule',{id});
+  assert.equal(s.drafts[0].scheduledAt,''); assert.equal(s.drafts[0].status,'approved');
+  assert.equal(s.drafts[0].reviewedBy,'Owner');
+  s=await post('drafts/update',{id,body:'Revised copy for review.'});
+  assert.equal(s.drafts[0].reviewedBy,''); assert.equal(s.drafts[0].status,'draft');
+  assert.equal(s.drafts[0].notes.length,1);
+  await post('drafts/update',{id,status:'approved'});
+  s=await post('drafts/update',{id,status:'completed'});
+  assert.equal(s.drafts[0].completedBy,'Owner');
+  await stop(); await start();
+  s=await (await fetch(base+'/api/state')).json();
+  assert.equal(s.drafts.find(d=>d.id===id).notes[0].body,'Confirm the offer before posting.');
+});
+
+test('lead stages and follow-ups persist and honor closed and opted-out contacts',async()=>{
+  let s=await post('leads',{company:'Follow-up test brand'});
+  const id=s.leads.at(-1).id;
+  await post('leads/update',{id,stage:'unknown'},400);
+  await post('leads/update',{id,stage:'proposal',notes:'Must not save',followUp:'2099-02-31'},400);
+  s=await post('leads/update',{id,stage:'interested',notes:'Discuss creative next week.',followUp:'2099-01-05'});
+  let lead=s.leads.find(l=>l.id===id);
+  assert.equal(lead.followUp,'2099-01-05'); assert.equal(lead.updatedBy,'Owner');
+  await post('leads/update',{id,stage:'won',notes:'Should not save',followUp:'2099-01-05'},400);
+  s=await (await fetch(base+'/api/state')).json();
+  assert.equal(s.leads.find(l=>l.id===id).stage,'interested');
+  await stop();await start();
+  s=await (await fetch(base+'/api/state')).json();
+  assert.equal(s.leads.find(l=>l.id===id).notes,'Discuss creative next week.');
+  s=await post('leads/opt-out',{id});
+  assert.equal(s.leads.find(l=>l.id===id).followUp,'');
+  await post('leads/update',{id,stage:'contacted',followUp:'2099-01-05'},400);
+  await post('generate',{type:'message',leadId:id},400);
+});
+
+test('lead assignment, contact edits, and conversation history use verified team identities',async()=>{
+  let s=await post('leads',{company:'Assigned prospect',name:'Marketing lead'});
+  const id=s.leads.at(-1).id, owner=s.members.find(m=>m.name==='Owner');
+  assert.ok(owner); assert.equal(owner.email,undefined); assert.equal(owner.hash,undefined);
+  await post('leads/update',{id,stage:'new',assigneeId:'missing-user'},400);
+  s=await post('leads/update',{id,stage:'new',company:'Updated prospect',name:'Priya',sector:'Retail',context:'your local launch',url:'https://www.linkedin.com/company/example/',assigneeId:owner.id});
+  assert.equal(s.leads.find(l=>l.id===id).assigneeId,owner.id);
+  assert.equal(s.leads.find(l=>l.id===id).company,'Updated prospect');
+  await post('leads/log',{id,channel:'fax',note:'Invalid'},400);
+  await post('leads/log',{id,channel:'call',note:''},400);
+  s=await post('leads/log',{id,channel:'call',note:'Discussed campaign goals.',author:'Fake author'});
+  const lead=s.leads.find(l=>l.id===id);
+  assert.equal(lead.stage,'contacted'); assert.equal(lead.touchpoints[0].author,'Owner'); assert.ok(lead.lastContactAt);
+  await stop(); await start();
+  s=await (await fetch(base+'/api/state')).json();
+  assert.equal(s.leads.find(l=>l.id===id).touchpoints[0].note,'Discussed campaign goals.');
+  await post('leads/opt-out',{id});
+  await post('leads/log',{id,channel:'email',note:'Not allowed'},400);
+  s=await post('leads/log',{id,channel:'note',note:'Requested no further contact.'});
+  assert.equal(s.leads.find(l=>l.id===id).touchpoints[0].channel,'note');
+});
