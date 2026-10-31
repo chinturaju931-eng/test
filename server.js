@@ -1,36 +1,27 @@
 import http from 'node:http';
-import { readFile, mkdir, writeFile, rename } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { defaultProfile, createPosts } from './brand.js';
 import { createAuth } from './auth.js';
+import { createStore } from './storage.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const dataFile = resolve(process.env.DATA_DIR || resolve(root, '.data'), 'workspace.json');
 const production = process.env.NODE_ENV === 'production';
 const publicUrl = process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '';
 if (production && (!publicUrl || new URL(publicUrl).protocol !== 'https:')) throw Error('Hosted mode requires PUBLIC_URL (or RENDER_EXTERNAL_URL) with HTTPS.');
-const auth = await createAuth(dirname(dataFile), production);
+const store = await createStore(dirname(dataFile));
+const auth = await createAuth(dirname(dataFile), production, store);
 let apiQueue = Promise.resolve();
 let requestActor = null;
 const initial = () => ({ profile: { ...defaultProfile }, leads: [], drafts: [], activity: [] });
-let state;
-try { state = JSON.parse(await readFile(dataFile, 'utf8')); }
-catch (error) { if (error.code !== 'ENOENT') throw error; state = initial(); }
+let state = await store.read('workspace',initial());
 // Fill new preference fields without replacing an existing workspace's values.
 state.profile = { ...defaultProfile, ...state.profile };
 state.version ??= 0;
-let writes = Promise.resolve();
-function persist() {
-  const snapshot = JSON.stringify(state, null, 2);
-  writes = writes.catch(() => {}).then(async () => {
-    await mkdir(dirname(dataFile), { recursive: true });
-    await writeFile(dataFile + '.tmp', snapshot, { mode: 0o600 });
-    await rename(dataFile + '.tmp', dataFile);
-  });
-  return writes;
-}
+function persist() { return store.write('workspace',state); }
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 function text(value, name, max = 5000, required = false) {
   if (typeof value !== 'string' || value.length > max || (required && !value.trim())) throw fail(`Enter a valid ${name} (up to ${max} characters).`);
@@ -79,11 +70,13 @@ const server = http.createServer(async (req, res) => {
       const expectedOrigin = publicUrl ? new URL(publicUrl).origin : `http://${req.headers.host}`;
       if (!publicUrl && !/^((127\.0\.0\.1)|(localhost))(:\d+)?$/.test(req.headers.host || '')) throw fail('Unrecognized host.',403);
       if (req.headers.origin && req.headers.origin !== expectedOrigin) throw fail('Cross-origin requests are not allowed.',403);
-      if(req.method === 'GET' && url.pathname === '/api/health') return send(res,200,{app:'commuteads',ready:true});
+      if(req.method === 'GET' && url.pathname === '/api/health') { const ready=store.health ? await store.health() : true; return send(res,ready?200:503,{app:'commuteads',ready}); }
+      await auth.refresh();
       if(req.method === 'GET' && url.pathname === '/api/auth/status') return send(res,200,auth.status(req));
       requestActor = auth.user(req);
       const authRoute = url.pathname.startsWith('/api/auth/') || url.pathname.startsWith('/api/team/');
       if(!authRoute && !requestActor) throw fail('Please sign in to your workspace.',401);
+      if(!authRoute && store.remote) { state=await store.read('workspace',initial()); state.version ??= 0; state.profile={...defaultProfile,...state.profile}; }
       if (req.method === 'GET' && url.pathname === '/api/state') return send(res, 200, state);
       if (req.method !== 'POST') throw fail('Route not found.', 404);
       if (!req.headers['content-type']?.startsWith('application/json')) throw fail('Use application/json.', 415);

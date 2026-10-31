@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID, scrypt as rawScrypt, timingSafeEqual, createHash } from 'node:crypto';
 import { promisify } from 'node:util';
-import { readFile, writeFile, rename, mkdir, unlink } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 const scrypt = promisify(rawScrypt);
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
@@ -21,11 +21,9 @@ async function matches(value, user) {
   const computed = await hash(typeof value === 'string' && value.length <= 200 ? value : '', user?.salt || 'dummy-authentication-salt');
   return timingSafeEqual(Buffer.from(computed.hash,'hex'), Buffer.from(user?.hash || '0'.repeat(128),'hex'));
 }
-export async function createAuth(dir, production) {
+export async function createAuth(dir, production, store) {
   await mkdir(dir, { recursive:true });
-  const file = join(dir,'accounts.json');
-  let users = [];
-  try { users = JSON.parse(await readFile(file,'utf8')); } catch(e) { if(e.code !== 'ENOENT') throw e; }
+  let users = await store.read('accounts',[]);
   let setupCode = process.env.SETUP_CODE || '';
   const setupFile = join(dir,'setup-code.txt');
   if (!users.length) {
@@ -42,17 +40,17 @@ export async function createAuth(dir, production) {
   function current(req) {
     const key = sessionKey(req), session = sessions.get(key);
     if (!session || session.expires < Date.now()) { sessions.delete(key); return null; }
-    return users.find(u=>u.id === session.id) || null;
+    return users.find(u=>u.id === session.id && u.hash === session.authHash) || null;
   }
   function issue(res,user) {
     for (const [key,s] of sessions) if(s.expires < Date.now()) sessions.delete(key);
     if(sessions.size > 1000) sessions.delete(sessions.keys().next().value);
     const token=randomBytes(32).toString('hex');
-    sessions.set(digest(token),{ id:user.id, expires:Date.now()+43200000 });
+    sessions.set(digest(token),{ id:user.id, authHash:user.hash, expires:Date.now()+43200000 });
     res.setHeader('Set-Cookie',cookie(token));
   }
   async function save(next) {
-    await writeFile(file+'.tmp',JSON.stringify(next),{mode:0o600}); await rename(file+'.tmp',file); users=next;
+    await store.write('accounts',next); users=next;
   }
   function limit(req,b) {
     const now=Date.now();
@@ -71,12 +69,14 @@ export async function createAuth(dir, production) {
     return {id:randomUUID(),name:b.name.trim(),email:normalized,role,...await hash(password(b.password))};
   }
   return {
+    async refresh() { if(store.remote) users=await store.read('accounts',[]); },
     user:req=>{const u=current(req);return u?safe(u):null;},
     status:req=>({ user:current(req)?safe(current(req)):null, setupRequired:users.length===0 }),
     async handle(path, req, res, b) {
       const actor=current(req);
       if(path==='/api/auth/setup') {
         if(users.length) throw fail('Workspace setup is already complete.',409);
+        if(setupCode.length < 24) throw fail('Setup is unavailable. Restart with a valid setup code.',503);
         limit(req,b);
         if(typeof b.code !== 'string' || !timingSafeEqual(Buffer.from(digest(b.code)),Buffer.from(digest(setupCode)))) throw fail('The setup code is incorrect.',403);
         const owner=await newUser(b,'owner'); await save([owner]); setupCode='';
